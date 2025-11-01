@@ -1,0 +1,40 @@
+[package]
+name = "proxy-wallet-service"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = "1.36.0"
+anyhow = "1.0.80"
+hex = "0.4.3"
+futures = "0.3.30"
+tokio-util = "0.7.15"
+
+[dependencies.linera-client]
+path = "../linera-protocol/linera-client"
+default-features = true
+
+[dependencies.linera-base]
+path = "../linera-protocol/linera-base"
+
+[dependencies.linera-rpc]
+path = "../linera-protocol/linera-rpc"
+
+[dependencies.linera-core]
+path = "../linera-protocol/linera-core"
+
+[dependencies.linera-faucet-client]
+path = "../linera-protocol/linera-faucet/client"
+
+[dependencies.linera-persistent]
+path = "../linera-protocol/linera-persistent"
+
+[dependencies.linera-storage]
+path = "../linera-protocol/linera-storage"
+
+[dependencies.linera-views]
+path = "../linera-protocol/linera-views"
+features = ["rocksdb"]
+
+[dependencies.linera-execution]
+path = "../linera-protocol/linera-execution"
