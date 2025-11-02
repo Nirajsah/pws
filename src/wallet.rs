@@ -112,15 +112,19 @@ impl PersistentWallet {
         let config = RocksDbStoreConfig {
             inner_config,
             storage_cache_config: StorageCacheConfig {
-                max_entry_size: 200_000, // need to update these values to what's actually needed. 
+                max_entry_size: 200_000, // need to update these values to what's actually needed.
                 max_cache_size: 100000,
                 max_cache_entries: 100000,
             },
         };
 
-        let storage = linera_storage::DbStorage::maybe_create_and_connect(&config, "linera", None)
-            .await
-            .expect("failed to create storage");
+        let storage = linera_storage::DbStorage::maybe_create_and_connect(
+            &config,
+            "linera",
+            Some(linera_execution::WasmRuntime::Wasmer),
+        )
+        .await
+        .expect("failed to create storage");
 
         Ok(PersistentWallet {
             wallet,

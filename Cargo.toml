@@ -38,3 +38,11 @@ features = ["rocksdb"]
 
 [dependencies.linera-execution]
 path = "../linera-protocol/linera-execution"
+
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
