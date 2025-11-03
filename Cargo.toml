@@ -9,6 +9,7 @@ anyhow = "1.0.80"
 hex = "0.4.3"
 futures = "0.3.30"
 tokio-util = "0.7.15"
+clap = { version = "4.5", features = ["derive"] }
 
 [dependencies.linera-client]
 path = "../linera-protocol/linera-client"
