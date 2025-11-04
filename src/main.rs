@@ -2,7 +2,9 @@
 
 use crate::{client::Client, wallet::PersistentWallet};
 pub mod client;
+pub mod resource;
 pub mod wallet;
+use crate::resource::start_resource_logger;
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::{Path, PathBuf};
@@ -10,12 +12,12 @@ use std::path::{Path, PathBuf};
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Path to the wallet directory (must contain wallet.json, keystore.json, and rocksdb.db/)
+    /// Path to the wallet directory (must contain wallet.json, keystore.json, and client.db)
     #[arg(long = "with-wallet", value_name = "PATH")]
     wallet_path: Option<PathBuf>,
 
-    /// Deploy the application and watch
-    #[arg(long, conflicts_with = "watch")]
+    /// Deploy the application
+    #[arg(long, conflicts_with_all = ["watch", "app_id"])]
     deploy: bool,
 
     /// Watch mode without deploying
@@ -41,7 +43,7 @@ fn validate_wallet_directory(wallet_path: &Path) -> Result<()> {
     // Check for required files
     let wallet_json = wallet_path.join("wallet.json");
     let keystore_json = wallet_path.join("keystore.json");
-    let rocksdb_dir = wallet_path.join("rocksdb.db");
+    let client_dir = wallet_path.join("client.db");
 
     if !wallet_json.exists() {
         anyhow::bail!(
@@ -65,15 +67,15 @@ fn validate_wallet_directory(wallet_path: &Path) -> Result<()> {
         anyhow::bail!("keystore.json is not a file: {}", keystore_json.display());
     }
 
-    if !rocksdb_dir.exists() {
+    if !client_dir.exists() {
         anyhow::bail!(
             "Missing rocksdb.db directory in wallet directory: {}",
             wallet_path.display()
         );
     }
 
-    if !rocksdb_dir.is_dir() {
-        anyhow::bail!("rocksdb.db is not a directory: {}", rocksdb_dir.display());
+    if !client_dir.is_dir() {
+        anyhow::bail!("rocksdb.db is not a directory: {}", client_dir.display());
     }
 
     println!(
@@ -82,7 +84,7 @@ fn validate_wallet_directory(wallet_path: &Path) -> Result<()> {
     );
     println!("  - wallet.json: found");
     println!("  - keystore.json: found");
-    println!("  - rocksdb.db/: found");
+    println!("  - client.db: found");
 
     Ok(())
 }
@@ -91,13 +93,14 @@ fn validate_wallet_directory(wallet_path: &Path) -> Result<()> {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    start_resource_logger();
     // Validate wallet directory if provided
-    if let Some(ref wallet_path) = args.wallet_path {
+    /* if let Some(ref wallet_path) = args.wallet_path {
         validate_wallet_directory(wallet_path).context("Wallet directory validation failed")?;
-    }
+    } */
 
     // Initialize the persistent wallet
-    // If wallet_path is provided, we use a different method
+    // If wallet_path is provided, you might want to pass it to PersistentWallet
     let p = PersistentWallet::new().await?;
 
     /*
@@ -114,25 +117,32 @@ async fn main() -> Result<()> {
     let app = client_context.frontend().application(&app_id).await?;
 
     // Handle deploy mode
-    if args.deploy {
+    /* if args.deploy {
         // here we'll deploy the app
         println!("🚀 Deploying application...");
         println!("✓ Deployment complete");
         return Ok(());
-    }
+    } */
 
     // Handle watch mode
     if args.watch {
         println!("👁️  Watch mode enabled (no deployment)");
         // here we subscribe to events from the app_chain
-        let sub_query = r#"{ "query": "query { value }" }"#;
+        let sub_query = r#"{ "query": "mutation { subscribe }" }"#;
 
         let r = app.query(sub_query).await?;
         println!("Subscribed: {:?}", r);
     }
 
+    client_context.on_notification(|n| {
+        println!(
+            "notification received in main.rs, now we can fetch: {:?}",
+            n
+        )
+    });
+
     // will add more logic here
     loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
     }
 }

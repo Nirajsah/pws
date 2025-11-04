@@ -1,5 +1,5 @@
 use crate::wallet::{PersistentWallet, Signer};
-use futures::lock::Mutex as AsyncMutex;
+use futures::{StreamExt, lock::Mutex as AsyncMutex};
 use linera_base::identifiers::ApplicationId;
 use linera_client::{
     chain_listener::{ChainListener, ChainListenerConfig, ClientContext},
@@ -8,6 +8,7 @@ use linera_client::{
 use linera_core::{
     data_types::ClientOutcome,
     node::{ValidatorNode, ValidatorNodeProvider},
+    worker::Notification,
 };
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -159,6 +160,24 @@ impl Client {
             .to_string())
     }
 
+    pub fn on_notification<F>(&self, f: F)
+    where
+        F: Fn(Notification) + Send + 'static,
+    {
+        let this = self.clone();
+        tokio::spawn(async move {
+            let mut notifications = this
+                .default_chain_client()
+                .await
+                .unwrap()
+                .subscribe()
+                .unwrap();
+            while let Some(notification) = notifications.next().await {
+                f(notification)
+            }
+        });
+    }
+
     pub fn frontend(&self) -> Frontend {
         Frontend(self.clone())
     }
@@ -238,8 +257,6 @@ impl Application {
     ///
     /// # Panics
     /// On internal protocol errors.
-    // TODO(#14) allow passing bytes here rather than just strings
-    // TODO(#15) a lot of this logic is shared with `linera_service::node_service`
     pub async fn query(&self, query: &str) -> Result<String, anyhow::Error> {
         let chain_client = self.client.default_chain_client().await?;
 
