@@ -208,8 +208,6 @@ impl Client {
     pub async fn publish_and_create(
         &self,
         path: Option<PathBuf>,
-        name: Option<String>,
-        vm_runtime: VmRuntime,
         json_parameters: Option<String>,
         json_parameters_path: Option<PathBuf>,
         json_argument: Option<String>,
@@ -219,7 +217,6 @@ impl Client {
         let mut context = self.client_context.lock().await;
         let start_time = Instant::now();
         let publisher = context.default_chain();
-        println!("Creating application on chain {} {:?}", publisher, path);
         let chain_client = context.make_chain_client(publisher);
 
         let parameters = read_json(json_parameters, json_parameters_path)?;
@@ -227,12 +224,10 @@ impl Client {
         let project_path = path.unwrap_or_else(|| env::current_dir().unwrap());
 
         let project = Project::from_existing_project(project_path)?;
-        let (contract_path, service_path) = project.build(name)?;
+        let (contract_path, service_path) = project.build(None)?;
         let module_id = context
-            .publish_module(&chain_client, contract_path, service_path, vm_runtime)
+            .publish_module(&chain_client, contract_path, service_path, VmRuntime::Wasm)
             .await?;
-
-        println!("Creating appl {:?} {:?}", chain_client, module_id);
 
         let (application_id, _) = context
             .apply_client_command(&chain_client, move |chain_client| {

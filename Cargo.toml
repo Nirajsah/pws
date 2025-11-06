@@ -15,24 +15,10 @@ fs-err = "3.1.3"
 env = "1.0.1"
 serde_json = "1.0.145"
 
-
-[features]
-default = ["wasmer", "rocksdb"]
-
-wasmer = [
-    "linera-client/wasmer",
-    "linera-execution/wasmer",
-    "linera-storage/wasmer",
-    "linera-core/wasmer",
-    "linera-service/wasmer",
-]
-
-rocksdb = ["linera-views/rocksdb"]
-
 [dependencies.linera-client]
 path = "../linera-protocol/linera-client"
 default-features = true
-features = ["fs", "wasmer"]
+features = ["fs"]
 
 [dependencies.linera-base]
 path = "../linera-protocol/linera-base"
@@ -42,7 +28,6 @@ path = "../linera-protocol/linera-rpc"
 
 [dependencies.linera-core]
 path = "../linera-protocol/linera-core"
-features = ["wasmer"]
 
 [dependencies.linera-faucet-client]
 path = "../linera-protocol/linera-faucet/client"
@@ -59,11 +44,9 @@ features = ["rocksdb"]
 
 [dependencies.linera-execution]
 path = "../linera-protocol/linera-execution"
-features = ["wasmer"]
 
 [dependencies.linera-service]
 path = "../linera-protocol/linera-service"
-features = ["wasmer"]
 
 [profile.release]
 opt-level = "z"

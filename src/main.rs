@@ -6,31 +6,40 @@ pub mod resource;
 pub mod wallet;
 use crate::resource::start_resource_logger;
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
     /// Path to the wallet directory (must contain wallet.json, keystore.json, and client.db)
-    #[arg(long = "with-wallet", value_name = "PATH")]
+    #[arg(long = "with-wallet", value_name = "PATH", global = true)]
     wallet_path: Option<PathBuf>,
 
-    /// Deploy the application
-    #[arg(long, conflicts_with_all = ["watch", "app_id"])]
-    deploy: bool,
+    #[command(subcommand)]
+    command: Commands,
+}
 
-    /// Watch mode without deploying
-    #[arg(long)]
-    path: PathBuf,
+#[derive(Subcommand, Debug)]
+enum Commands {
+    Metrics,
+    /// Deploy an application and run as server
+    Deploy {
+        /// Path to the project directory containing the contract and service WASM files
+        #[arg(long, value_name = "PATH")]
+        path: PathBuf,
 
-    /// Watch mode without deploying
-    #[arg(long, conflicts_with = "deploy")]
-    watch: bool,
+        /// JSON-encoded initialization arguments for the application
+        #[arg(long = "json-argument", value_name = "JSON")]
+        json_argument: Option<String>,
+    },
 
-    /// Application ID to interact with
-    #[arg(long, value_name = "APP_ID")]
-    app_id: Option<String>,
+    /// Subscribe and watch an existing application
+    Watch {
+        /// Application ID to subscribe to
+        #[arg(long, value_name = "APP_ID")]
+        app_id: String,
+    },
 }
 
 /// Validates that the wallet directory contains all required files
@@ -73,13 +82,13 @@ fn validate_wallet_directory(wallet_path: &Path) -> Result<()> {
 
     if !client_dir.exists() {
         anyhow::bail!(
-            "Missing rocksdb.db directory in wallet directory: {}",
+            "Missing client.db directory in wallet directory: {}",
             wallet_path.display()
         );
     }
 
     if !client_dir.is_dir() {
-        anyhow::bail!("rocksdb.db is not a directory: {}", client_dir.display());
+        anyhow::bail!("client.db is not a directory: {}", client_dir.display());
     }
 
     println!(
@@ -92,63 +101,59 @@ fn validate_wallet_directory(wallet_path: &Path) -> Result<()> {
 
     Ok(())
 }
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    start_resource_logger();
     // Validate wallet directory if provided
-    /* if let Some(ref wallet_path) = args.wallet_path {
+    if let Some(ref wallet_path) = args.wallet_path {
         validate_wallet_directory(wallet_path).context("Wallet directory validation failed")?;
-    } */
+    }
 
     // Initialize the persistent wallet
-    // If wallet_path is provided, you might want to pass it to PersistentWallet
-    let p = PersistentWallet::new().await?;
+    let persistent_wallet = PersistentWallet::new().await?;
+    let client_context = Client::new(persistent_wallet).await?;
 
-    /*
-        1. We deploy the app on a new wallet(chain) and create a new instance of client and watch.
-        2. Just start the service for a wallet and watch.
-        3. Subscribe to a app_chain and watch.
-    */
-    let client_context = Client::new(p).await?;
-    /* // Use provided app_id or default
-    let app_id = args.app_id.unwrap_or_else(|| {
-        "443ff420b2265303779c7d2d681353e47826cb4b1977d8b0351076f666cf7f93".to_string()
-    });
+    // Handle commands
+    match args.command {
+        Commands::Metrics => {
+            start_resource_logger();
+        }
+        Commands::Deploy {
+            path,
+            json_argument,
+        } => {
+            println!("🚀 Deploying application...");
+            println!("  - Project path: {}", path.display());
 
-    let app = client_context.frontend().application(&app_id).await?; */
+            if let Some(ref json_arg) = json_argument {
+                println!("  - JSON argument: {}", json_arg);
+            }
 
-    // Handle deploy mode
-    if args.deploy {
-        // here we'll deploy the app
-        println!("🚀 Deploying application...");
-        client_context
-            .publish_and_create(
-                Some(args.path),
-                Some("counter".to_string()),
-                linera_base::vm::VmRuntime::Wasm,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .await?;
+            client_context
+                .publish_and_create(Some(path), json_argument, None, None, None, None)
+                .await?;
 
-        println!("✓ Deployment complete");
+            println!("✓ Deployment complete");
+        }
+
+        Commands::Watch { app_id } => {
+            println!(" Watch mode enabled");
+            println!(" - Application ID: {}", app_id);
+
+            let app = client_context.frontend().application(&app_id).await?;
+
+            // Subscribe to events from the app chain
+            let sub_query = r#"{ "query": "mutation { subscribe }" }"#;
+            let result = app.query(sub_query).await?;
+
+            println!("✓ Subscribed successfully: {:?}", result);
+            println!(" Watching for events...");
+        }
     }
 
-    // Handle watch mode
-    if args.watch {
-        println!("👁️  Watch mode enabled (no deployment)");
-        // here we subscribe to events from the app_chain
-        let sub_query = r#"{ "query": "mutation { subscribe }" }"#;
-
-        // let r = app.query(sub_query).await?;
-        println!("Subscribed: {:?}", 0);
-    }
-
+    // Setup notification handler
     client_context.on_notification(|n| {
         println!(
             "notification received in main.rs, now we can fetch: {:?}",
@@ -156,7 +161,6 @@ async fn main() -> Result<()> {
         )
     });
 
-    // will add more logic here
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
     }
