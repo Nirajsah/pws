@@ -21,6 +21,10 @@ struct Args {
     deploy: bool,
 
     /// Watch mode without deploying
+    #[arg(long)]
+    path: PathBuf,
+
+    /// Watch mode without deploying
     #[arg(long, conflicts_with = "deploy")]
     watch: bool,
 
@@ -88,7 +92,6 @@ fn validate_wallet_directory(wallet_path: &Path) -> Result<()> {
 
     Ok(())
 }
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -109,20 +112,32 @@ async fn main() -> Result<()> {
         3. Subscribe to a app_chain and watch.
     */
     let client_context = Client::new(p).await?;
-    // Use provided app_id or default
+    /* // Use provided app_id or default
     let app_id = args.app_id.unwrap_or_else(|| {
         "443ff420b2265303779c7d2d681353e47826cb4b1977d8b0351076f666cf7f93".to_string()
     });
 
-    let app = client_context.frontend().application(&app_id).await?;
+    let app = client_context.frontend().application(&app_id).await?; */
 
     // Handle deploy mode
-    /* if args.deploy {
+    if args.deploy {
         // here we'll deploy the app
         println!("🚀 Deploying application...");
+        client_context
+            .publish_and_create(
+                Some(args.path),
+                Some("counter".to_string()),
+                linera_base::vm::VmRuntime::Wasm,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await?;
+
         println!("✓ Deployment complete");
-        return Ok(());
-    } */
+    }
 
     // Handle watch mode
     if args.watch {
@@ -130,8 +145,8 @@ async fn main() -> Result<()> {
         // here we subscribe to events from the app_chain
         let sub_query = r#"{ "query": "mutation { subscribe }" }"#;
 
-        let r = app.query(sub_query).await?;
-        println!("Subscribed: {:?}", r);
+        // let r = app.query(sub_query).await?;
+        println!("Subscribed: {:?}", 0);
     }
 
     client_context.on_notification(|n| {

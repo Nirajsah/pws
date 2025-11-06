@@ -1,6 +1,7 @@
 use crate::wallet::{PersistentWallet, Signer};
-use futures::{StreamExt, lock::Mutex as AsyncMutex};
-use linera_base::identifiers::ApplicationId;
+use anyhow::{bail, Result};
+use futures::{lock::Mutex as AsyncMutex, StreamExt};
+use linera_base::{identifiers::ApplicationId, vm::VmRuntime};
 use linera_client::{
     chain_listener::{ChainListener, ChainListenerConfig, ClientContext},
     client_options::ClientContextOptions,
@@ -10,7 +11,16 @@ use linera_core::{
     node::{ValidatorNode, ValidatorNodeProvider},
     worker::Notification,
 };
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use linera_service::project::Project;
+use serde_json::Value;
+use std::{
+    collections::HashMap,
+    env,
+    future::Future,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crate::wallet::Storage;
 
@@ -55,6 +65,19 @@ pub const OPTIONS: ClientContextOptions = ClientContextOptions {
     otel_trace_file: None,
     otel_exporter_otlp_endpoint: None,
 };
+
+fn read_json(string: Option<String>, path: Option<PathBuf>) -> anyhow::Result<Vec<u8>> {
+    let value = match (string, path) {
+        (Some(_), Some(_)) => bail!("cannot have both a json string and file"),
+        (Some(s), None) => serde_json::from_str(&s)?,
+        (None, Some(path)) => {
+            let s = fs_err::read_to_string(path)?;
+            serde_json::from_str(&s)?
+        }
+        (None, None) => Value::Null,
+    };
+    Ok(serde_json::to_vec(&value)?)
+}
 
 #[derive(Clone)]
 pub struct Frontend(Client);
@@ -180,6 +203,64 @@ impl Client {
 
     pub fn frontend(&self) -> Frontend {
         Frontend(self.clone())
+    }
+
+    pub async fn publish_and_create(
+        &self,
+        path: Option<PathBuf>,
+        name: Option<String>,
+        vm_runtime: VmRuntime,
+        json_parameters: Option<String>,
+        json_parameters_path: Option<PathBuf>,
+        json_argument: Option<String>,
+        json_argument_path: Option<PathBuf>,
+        required_application_ids: Option<Vec<ApplicationId>>,
+    ) -> Result<()> {
+        let mut context = self.client_context.lock().await;
+        let start_time = Instant::now();
+        let publisher = context.default_chain();
+        println!("Creating application on chain {} {:?}", publisher, path);
+        let chain_client = context.make_chain_client(publisher);
+
+        let parameters = read_json(json_parameters, json_parameters_path)?;
+        let argument = read_json(json_argument, json_argument_path)?;
+        let project_path = path.unwrap_or_else(|| env::current_dir().unwrap());
+
+        let project = Project::from_existing_project(project_path)?;
+        let (contract_path, service_path) = project.build(name)?;
+        let module_id = context
+            .publish_module(&chain_client, contract_path, service_path, vm_runtime)
+            .await?;
+
+        println!("Creating appl {:?} {:?}", chain_client, module_id);
+
+        let (application_id, _) = context
+            .apply_client_command(&chain_client, move |chain_client| {
+                let parameters = parameters.clone();
+                let argument = argument.clone();
+                let chain_client = chain_client.clone();
+                let required_application_ids = required_application_ids.clone();
+
+                async move {
+                    chain_client
+                        .create_application_untyped(
+                            module_id,
+                            parameters,
+                            argument,
+                            required_application_ids.unwrap_or_default(),
+                        )
+                        .await
+                }
+            })
+            .await?;
+
+        println!("Application published successfully!");
+        println!(
+            "Project published and created in {} ms",
+            start_time.elapsed().as_millis()
+        );
+        println!("{}", application_id);
+        Ok(())
     }
 }
 
