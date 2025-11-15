@@ -2,7 +2,7 @@
 
 ## Overview
 
-`proxy-wallet-service` is a wannabe linera service that provides the same client operations without installing the entire linera binaries. It abstracts the linera service implementation and exposes a clean API for:
+`proxy-wallet-service` is a service that provides the same client operations as linera-service without installing the entire linera binaries. It abstracts the linera service implementation and exposes a clean API for:
 
 - **Creating wallets**
 - **Managing Chains**
@@ -12,7 +12,7 @@ The service is designed to be lightweight, highly concurrent, and easy to integr
 
 ## Capabilities
 
-- **Client abstraction** – Handles communication with the underlying wallet implementation.
+- **Client abstraction** – Handles communication.
 - **Coming soon...**
 
 ## Getting Started

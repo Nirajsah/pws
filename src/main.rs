@@ -1,8 +1,12 @@
 #![recursion_limit = "256"]
 
+use crate::model::{LeaderBoard, WalletRecord};
+use crate::supabase::{SupabaseClient, SupabaseModel};
 use crate::{client::Client, wallet::PersistentWallet};
 pub mod client;
+pub mod model;
 pub mod resource;
+pub mod supabase;
 pub mod wallet;
 use crate::resource::start_resource_logger;
 use anyhow::{Context, Result};
@@ -15,6 +19,9 @@ struct Args {
     /// Path to the wallet directory (must contain wallet.json, keystore.json, and client.db)
     #[arg(long = "with-wallet", value_name = "PATH", global = true)]
     wallet_path: Option<PathBuf>,
+
+    #[arg(long)]
+    metrics: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -40,6 +47,7 @@ enum Commands {
         #[arg(long, value_name = "APP_ID")]
         app_id: String,
     },
+    Supabase,
 }
 
 /// Validates that the wallet directory contains all required files
@@ -131,9 +139,9 @@ async fn main() -> Result<()> {
                 println!("  - JSON argument: {}", json_arg);
             }
 
-            client_context
-                .publish_and_create(Some(path), json_argument, None, None, None, None)
-                .await?;
+            /* client_context
+            .publish_and_create(Some(path), json_argument, None, None, None, None)
+            .await?; */
 
             println!("✓ Deployment complete");
         }
@@ -146,20 +154,33 @@ async fn main() -> Result<()> {
 
             // Subscribe to events from the app chain
             let sub_query = r#"{ "query": "mutation { subscribe }" }"#;
-            let result = app.query(sub_query).await?;
+            let _ = app.query(sub_query).await?;
 
-            println!("✓ Subscribed successfully: {:?}", result);
+            let query_leaderboard = r#"{ "query": "mutation { subscribe }" }"#;
+            let leaderboard = app.query(query_leaderboard).await?;
+
+            // println!("✓ Subscribed successfully: {:?}", result);
+
+            /* client_context.on_notification(|n| {
+                println!(
+                    "notification received in main.rs, now we can fetch: {:?}",
+                    n
+                )
+            }); */
             println!(" Watching for events...");
+
+            let client = SupabaseClient::new()?;
+            let leaderboard = LeaderBoard {};
+            leaderboard.insert(&client).await?;
+        }
+        Commands::Supabase => {
+            let client = SupabaseClient::new()?;
+            let leaderboard = LeaderBoard {};
+            leaderboard.insert(&client).await?;
         }
     }
 
     // Setup notification handler
-    client_context.on_notification(|n| {
-        println!(
-            "notification received in main.rs, now we can fetch: {:?}",
-            n
-        )
-    });
 
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
