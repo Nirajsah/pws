@@ -62,8 +62,14 @@ pub const OPTIONS: ClientContextOptions = ClientContextOptions {
     keystore_path: None,
     with_wallet: None,
     chrome_trace_exporter: false,
-    otel_trace_file: None,
-    otel_exporter_otlp_endpoint: None,
+    chrome_trace_file: None,
+    otlp_exporter_endpoint: None,
+    max_accepted_latency_ms: 100.00,
+    cache_ttl_ms: 10000,
+    cache_max_size: 10000,
+    max_request_ttl_ms: 10000,
+    alpha: 10000.00,
+    alternative_peers_retry_delay_ms: 10000,
 };
 
 fn read_json(string: Option<String>, path: Option<PathBuf>) -> anyhow::Result<Vec<u8>> {
@@ -340,10 +346,13 @@ impl Application {
             response: linera_execution::QueryResponse::User(response),
             operations,
         } = chain_client
-            .query_application(linera_execution::Query::User {
-                application_id: self.id,
-                bytes: query.as_bytes().to_vec(),
-            })
+            .query_application(
+                linera_execution::Query::User {
+                    application_id: self.id,
+                    bytes: query.as_bytes().to_vec(),
+                },
+                None,
+            )
             .await?
         else {
             panic!("system response to user query")
