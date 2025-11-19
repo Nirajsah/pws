@@ -9,7 +9,6 @@ use linera_client::{
 use linera_core::{
     data_types::ClientOutcome,
     node::{ValidatorNode, ValidatorNodeProvider},
-    worker::Notification,
 };
 use linera_service::project::Project;
 use serde_json::Value;
@@ -64,12 +63,13 @@ pub const OPTIONS: ClientContextOptions = ClientContextOptions {
     chrome_trace_exporter: false,
     chrome_trace_file: None,
     otlp_exporter_endpoint: None,
-    max_accepted_latency_ms: 100.00,
-    cache_ttl_ms: 10000,
-    cache_max_size: 10000,
-    max_request_ttl_ms: 10000,
-    alpha: 10000.00,
-    alternative_peers_retry_delay_ms: 10000,
+
+    max_accepted_latency_ms: linera_core::client::requests_scheduler::MAX_ACCEPTED_LATENCY_MS,
+    cache_ttl_ms: linera_core::client::requests_scheduler::CACHE_TTL_MS,
+    cache_max_size: linera_core::client::requests_scheduler::CACHE_MAX_SIZE,
+    max_request_ttl_ms: linera_core::client::requests_scheduler::MAX_REQUEST_TTL_MS,
+    alpha: linera_core::client::requests_scheduler::ALPHA_SMOOTHING_FACTOR,
+    alternative_peers_retry_delay_ms: linera_core::client::requests_scheduler::STAGGERED_DELAY_MS,
 };
 
 fn read_json(string: Option<String>, path: Option<PathBuf>) -> anyhow::Result<Vec<u8>> {
@@ -189,9 +189,10 @@ impl Client {
             .to_string())
     }
 
-    pub fn on_notification<F>(&self, f: F)
+    pub fn on_notification<F, Fut>(&self, f: F)
     where
-        F: Fn(Notification) + Send + 'static,
+        F: Fn() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let this = self.clone();
         tokio::spawn(async move {
@@ -201,8 +202,8 @@ impl Client {
                 .unwrap()
                 .subscribe()
                 .unwrap();
-            while let Some(notification) = notifications.next().await {
-                f(notification)
+            while let Some(_notification) = notifications.next().await {
+                f().await;
             }
         });
     }
@@ -265,6 +266,7 @@ impl Client {
     }
 }
 
+#[derive(Clone)]
 pub struct Application {
     client: Client,
     id: ApplicationId,

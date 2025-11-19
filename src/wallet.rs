@@ -78,7 +78,8 @@ pub struct PersistentWallet {
 }
 
 // for local testing
-const FAUCET_URL: &str = "http://localhost:8079";
+// const FAUCET_URL: &str = "http://localhost:8079";
+const FAUCET_URL: &str = "https://faucet.testnet-conway.linera.net/";
 
 impl PersistentWallet {
     pub async fn new() -> Result<Self, anyhow::Error> {
@@ -104,7 +105,7 @@ impl PersistentWallet {
             .await??;
 
         let inner_config = RocksDbStoreInternalConfig {
-            path_with_guard: PathWithGuard::new("./client.db".into()),
+            path_with_guard: PathWithGuard::new("./linera".into()),
             spawn_mode: RocksDbSpawnMode::SpawnBlocking, // Best for tokio multi-threaded
             max_stream_queries: 20,                      // Higher for better concurrency
         };
