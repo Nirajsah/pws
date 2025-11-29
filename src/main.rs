@@ -11,7 +11,10 @@ pub mod wallet;
 use crate::resource::start_resource_logger;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use model::{CountResponse, GameCount, LeaderBoardResponse};
+use model::{
+    CountResponse, GameCount, LeaderBoardResponse, MatchHistory, MatchHistoryDB,
+    MatchHistoryResponse,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -118,6 +121,7 @@ fn validate_wallet_directory(wallet_path: &Path) -> Result<()> {
 struct CachedState {
     count: Option<u64>,
     leaderboard: Option<Vec<Leaderboard>>,
+    matches: Option<MatchHistory>,
 }
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -163,11 +167,13 @@ async fn main() -> Result<()> {
             let query_leaderboard =
                 r#"{ "query": "query { leaderboard { elo id name matches won lost } }" }"#;
             let query_count = r#"{ "query": "query { count }" }"#;
+            let query_matches = r#"{ "query": "query { matchHistoryLast { you { id name } opponent { id name } blobHash } }" }"#;
 
             // Create shared cache
             let cache = Arc::new(Mutex::new(CachedState {
                 count: None,
                 leaderboard: None,
+                matches: None,
             }));
 
             let app_arc = Arc::new(app);
@@ -196,6 +202,14 @@ async fn main() -> Result<()> {
                         }
                     };
 
+                    let response_m = match app.query(&query_matches).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("✗ Matches query failed: {}", e);
+                            return;
+                        }
+                    };
+
                     // Parse responses
                     let leaderboard_data: LeaderBoardResponse =
                         match serde_json::from_str(&response_l) {
@@ -213,6 +227,15 @@ async fn main() -> Result<()> {
                             return;
                         }
                     };
+
+                    let matches_data: Option<MatchHistoryResponse> =
+                        match serde_json::from_str(&response_m) {
+                            Ok(d) => Some(d),
+                            Err(e) => {
+                                eprintln!("✗ Failed to parse match history: {}", e);
+                                None
+                            }
+                        };
 
                     let new_leaderboard = leaderboard_data.data.leaderboard;
                     let new_count = count_data.data.count;
@@ -256,6 +279,47 @@ async fn main() -> Result<()> {
                                 updates_made = true;
                             }
                             Err(e) => eprintln!("✗ Failed to update leaderboard: {}", e),
+                        }
+                    }
+
+                    /* if let Some(match_history) = matches_data {
+                        let new_match = match_history.data.match_history_last;
+                        // Update Match history if changed
+                        if cache_guard.matches.as_ref() != Some(&new_match) {
+                            println!("Last match update: {:?}", new_match);
+
+                            match MatchHistoryDB::insert(&new_match.for_db(), &supabase_client)
+                                .await
+                            {
+                                Ok(_) => {
+                                    println!("✓ Updated matches list in Supabase");
+                                    cache_guard.matches = Some(new_match);
+                                    updates_made = true;
+                                }
+                                Err(e) => eprintln!("✗ Failed to update matches list: {}", e),
+                            }
+                        }
+                    } */
+
+                    if let Some(response) = matches_data {
+                        if let Some(new_match) = response.data.match_history_last {
+                            // Update Match history if changed
+                            if cache_guard.matches.as_ref() != Some(&new_match) {
+                                println!("Last match update: {:?}", new_match);
+
+                                match MatchHistoryDB::insert(&new_match.for_db(), &supabase_client)
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        println!("✓ Updated matches list in Supabase");
+                                        cache_guard.matches = Some(new_match);
+                                        updates_made = true;
+                                    }
+                                    Err(e) => eprintln!("✗ Failed to update matches list: {}", e),
+                                }
+                            }
+                        } else {
+                            println!("No match history found (null response).");
                         }
                     }
 
