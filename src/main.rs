@@ -1,20 +1,25 @@
 #![recursion_limit = "256"]
+#![allow(dead_code)]
 
-use crate::model::Leaderboard;
 use crate::supabase::{SupabaseClient, SupabaseModel};
 use crate::{client::Client, wallet::PersistentWallet};
 pub mod client;
-pub mod model;
+pub mod models;
 pub mod resource;
 pub mod supabase;
 pub mod wallet;
 use crate::resource::start_resource_logger;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use model::{
-    CountResponse, GameCount, LeaderBoardResponse, MatchHistory, MatchHistoryDB,
+use models::tournament::{
+    participants_query, ParticipantResponse, Tournament, TournamentParticipant, TournamentResponse,
+    QUERY_TOURNAMENTS,
+};
+use models::{
+    CountResponse, GameCount, LeaderBoardResponse, Leaderboard, MatchHistory, MatchHistoryDB,
     MatchHistoryResponse,
 };
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -122,6 +127,8 @@ struct CachedState {
     count: Option<u64>,
     leaderboard: Option<Vec<Leaderboard>>,
     matches: Option<MatchHistory>,
+    tournaments: HashMap<String, Tournament>,
+    participants: HashMap<String, HashMap<String, TournamentParticipant>>,
 }
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -164,16 +171,13 @@ async fn main() -> Result<()> {
             let sub_query = r#"{ "query": "mutation { subscribe }" }"#;
             let _ = app.query(sub_query).await?;
 
-            let query_leaderboard =
-                r#"{ "query": "query { leaderboard { elo id name matches won lost } }" }"#;
-            let query_count = r#"{ "query": "query { count }" }"#;
-            let query_matches = r#"{ "query": "query { matchHistoryLast { you { id name } opponent { id name } blobHash } }" }"#;
-
             // Create shared cache
             let cache = Arc::new(Mutex::new(CachedState {
                 count: None,
                 leaderboard: None,
                 matches: None,
+                tournaments: HashMap::new(),
+                participants: HashMap::new(),
             }));
 
             let app_arc = Arc::new(app);
@@ -186,7 +190,7 @@ async fn main() -> Result<()> {
                 let supabase_client = Arc::clone(&supabase_client);
 
                 async move {
-                    let response_l = match app.query(&query_leaderboard).await {
+                    let response_t = match app.query(QUERY_TOURNAMENTS).await {
                         Ok(r) => r,
                         Err(e) => {
                             eprintln!("✗ Leaderboard query failed: {}", e);
@@ -194,7 +198,99 @@ async fn main() -> Result<()> {
                         }
                     };
 
-                    let response_c = match app.query(&query_count).await {
+                    let tournaments_resp: TournamentResponse =
+                        match serde_json::from_str(&response_t) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                eprintln!("✗ Failed to parse tournaments: {:?}", e);
+                                return;
+                            }
+                        };
+                    println!("tournament: {:?}", tournaments_resp);
+
+                    let mut cache_guard = cache.lock().await;
+
+                    for tournament in tournaments_resp.data.all_tournaments {
+                        // Check if tournament changed
+                        let should_update = match cache_guard.tournaments.get(&tournament.tournament_id) {
+                            Some(cached_t) => cached_t != &tournament,
+                            None => true,
+                        };
+
+                        if should_update {
+                             println!("Tournament {} changed or new, updating Supabase...", tournament.tournament_id);
+                             // Use insert which maps to upsert for TournamentDB to avoid full delete/insert cycle
+                             match tournament.for_db().insert(&supabase_client).await {
+                                Ok(_) => {
+                                    println!("✓ Updated tournament {} in Supabase", tournament.tournament_name);
+                                    cache_guard.tournaments.insert(tournament.tournament_id.clone(), tournament.clone());
+                                }
+                                Err(e) => eprintln!("✗ Failed to update tournament: {}", e),
+                            }
+                        }
+
+                        let query = participants_query(&tournament.tournament_id);
+                        let response_p = match app.query(&query).await {
+                            Ok(r) => r,
+                            Err(e) => {
+                                eprintln!("✗ Participants query failed: {}", e);
+                                return;
+                            }
+                        };
+
+                        let participants_resp: ParticipantResponse =
+                            match serde_json::from_str(&response_p) {
+                                Ok(d) => d,
+                                Err(e) => {
+                                    eprintln!("✗ Failed to parse participants: {}", e);
+                                    return;
+                                }
+                            };
+
+                        let current_participants_map: HashMap<String, TournamentParticipant> = participants_resp
+                            .data
+                            .participants
+                            .into_iter()
+                            .map(|p| (p.id.clone(), p))
+                            .collect();
+
+                        let tournament_participants_cache = cache_guard.participants.entry(tournament.tournament_id.clone()).or_default();
+
+                        for (p_id, participant) in &current_participants_map {
+                            let p_should_update = match tournament_participants_cache.get(p_id) {
+                                Some(cached_p) => cached_p != participant,
+                                None => true,
+                            };
+
+                            if p_should_update {
+                                println!("Participant {} changed or new, updating Supabase...", p_id);
+                                match participant
+                                    .for_db(tournament.tournament_id.clone())
+                                    .insert(&supabase_client)
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        println!("✓ Updated participant {} in Supabase", p_id);
+                                        // Update the specific participant in the cache
+                                        tournament_participants_cache.insert(p_id.clone(), participant.clone());
+                                    }
+                                    Err(e) => eprintln!("✗ Failed to update participant: {}", e),
+                                }
+                            }
+                        }
+                    }
+                    // Leaderboard
+                    let query_leaderboard = r#"{ "query": "query { leaderboard { elo id name matches won lost } }" }"#;
+                    let response_l = match app.query(query_leaderboard).await {
+                         Ok(r) => r,
+                         Err(e) => {
+                             eprintln!("✗ Leaderboard query failed: {}", e);
+                             return;
+                         }
+                    };
+
+                    let query_count = r#"{ "query": "query { count }" }"#;
+                    let response_c = match app.query(query_count).await {
                         Ok(r) => r,
                         Err(e) => {
                             eprintln!("✗ Count query failed: {}", e);
@@ -202,7 +298,8 @@ async fn main() -> Result<()> {
                         }
                     };
 
-                    let response_m = match app.query(&query_matches).await {
+                    let query_matches = r#"{ "query": "query { matchHistoryLast { you { id name } opponent { id name } blobHash } }" }"#;
+                    let response_m = match app.query(query_matches).await {
                         Ok(r) => r,
                         Err(e) => {
                             eprintln!("✗ Matches query failed: {}", e);
@@ -211,7 +308,7 @@ async fn main() -> Result<()> {
                     };
 
                     // Parse responses
-                    let leaderboard_data: LeaderBoardResponse =
+                     let leaderboard_data: LeaderBoardResponse =
                         match serde_json::from_str(&response_l) {
                             Ok(d) => d,
                             Err(e) => {
@@ -240,10 +337,6 @@ async fn main() -> Result<()> {
                     let new_leaderboard = leaderboard_data.data.leaderboard;
                     let new_count = count_data.data.count;
 
-                    // Check cache and update only if changed
-                    let mut cache_guard = cache.lock().await;
-                    let mut updates_made = false;
-
                     // Update count if changed
                     if cache_guard.count != Some(new_count) {
                         println!("📊 Count changed: {:?} -> {}", cache_guard.count, new_count);
@@ -257,7 +350,6 @@ async fn main() -> Result<()> {
                             Ok(_) => {
                                 println!("✓ Updated count in Supabase");
                                 cache_guard.count = Some(new_count);
-                                updates_made = true;
                             }
                             Err(e) => eprintln!("✗ Failed to update count: {}", e),
                         }
@@ -276,33 +368,13 @@ async fn main() -> Result<()> {
                             Ok(_) => {
                                 println!("✓ Updated leaderboard in Supabase");
                                 cache_guard.leaderboard = Some(new_leaderboard);
-                                updates_made = true;
                             }
                             Err(e) => eprintln!("✗ Failed to update leaderboard: {}", e),
                         }
                     }
 
-                    /* if let Some(match_history) = matches_data {
-                        let new_match = match_history.data.match_history_last;
-                        // Update Match history if changed
-                        if cache_guard.matches.as_ref() != Some(&new_match) {
-                            println!("Last match update: {:?}", new_match);
-
-                            match MatchHistoryDB::insert(&new_match.for_db(), &supabase_client)
-                                .await
-                            {
-                                Ok(_) => {
-                                    println!("✓ Updated matches list in Supabase");
-                                    cache_guard.matches = Some(new_match);
-                                    updates_made = true;
-                                }
-                                Err(e) => eprintln!("✗ Failed to update matches list: {}", e),
-                            }
-                        }
-                    } */
-
-                    if let Some(response) = matches_data {
-                        if let Some(new_match) = response.data.match_history_last {
+                    if let Some(match_history) = matches_data {
+                         if let Some(new_match) = match_history.data.match_history_last {
                             // Update Match history if changed
                             if cache_guard.matches.as_ref() != Some(&new_match) {
                                 println!("Last match update: {:?}", new_match);
@@ -313,19 +385,12 @@ async fn main() -> Result<()> {
                                     Ok(_) => {
                                         println!("✓ Updated matches list in Supabase");
                                         cache_guard.matches = Some(new_match);
-                                        updates_made = true;
                                     }
                                     Err(e) => eprintln!("✗ Failed to update matches list: {}", e),
                                 }
                             }
-                        } else {
-                            println!("No match history found (null response).");
                         }
-                    }
-
-                    if !updates_made {
-                        println!("No changes detected, skipping Supabase update");
-                    }
+                    } 
                 }
             });
 

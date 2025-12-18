@@ -147,4 +147,47 @@ impl SupabaseClient {
         println!("[Supabase] Deleted all rows from `{}`", table);
         Ok(self)
     }
+
+    pub async fn delete_one<T: SupabaseModel>(&self, primary_key_value: &str) -> Result<&Self> {
+        let table = T::table_name();
+        let pk = T::primary_key();
+
+        let endpoint = format!(
+            "{}/rest/v1/{}?{}={}",
+            self.url,
+            table,
+            pk,
+            urlencoding::encode(&format!("eq.{}", primary_key_value))
+        );
+
+        let res = self
+            .client
+            .delete(&endpoint)
+            .header("apikey", &self.key)
+            .header("Authorization", format!("Bearer {}", self.key))
+            .header("Prefer", "return=minimal") // Supabase standard
+            .send()
+            .await?;
+
+        let status = res.status();
+        let body = res.text().await?;
+
+        if !status.is_success() {
+            anyhow::bail!(
+                "Failed to delete from `{}` where {}={}: {} (status: {})",
+                table,
+                pk,
+                primary_key_value,
+                body,
+                status
+            );
+        }
+
+        println!(
+            "[Supabase] ✓ Deleted from `{}` where {}={}",
+            table, pk, primary_key_value
+        );
+
+        Ok(self)
+    }
 }
