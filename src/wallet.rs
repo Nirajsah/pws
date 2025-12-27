@@ -1,80 +1,33 @@
-use std::error::Error as StdError;
-use std::fmt;
-use std::ops::{Deref, DerefMut};
+// Copyright (c) Zefchain Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
 
-use linera_base::crypto::InMemorySigner;
-use linera_base::identifiers::AccountOwner;
-use linera_client::wallet::Wallet;
+use linera_base::{crypto::InMemorySigner, identifiers::ChainId};
+use linera_client::config::GenesisConfig;
+use linera_core::wallet;
 use linera_faucet_client::Faucet;
-use linera_persistent::{Persist, PersistExt};
-use linera_views::lru_caching::StorageCacheConfig;
-use linera_views::rocks_db::{
-    PathWithGuard, RocksDbSpawnMode, RocksDbStoreConfig, RocksDbStoreInternalConfig,
+use linera_persistent::{self as persistent, Persist};
+use linera_views::{
+    lru_prefix_cache::StorageCacheConfig,
+    rocks_db::{PathWithGuard, RocksDbSpawnMode, RocksDbStoreConfig, RocksDbStoreInternalConfig},
 };
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
-pub type Storage =
-    linera_storage::DbStorage<linera_views::rocks_db::RocksDbDatabase, linera_storage::WallClock>;
-pub type Signer = InMemorySigner;
+use crate::storage::Storage;
 
-impl Deref for PersistentWallet {
-    type Target = Wallet;
-
-    fn deref(&self) -> &Self::Target {
-        &self.wallet
-    }
-}
-
-impl DerefMut for PersistentWallet {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.wallet.as_mut()
-    }
-}
-
-#[derive(Debug)]
-pub struct WasmPersistError {
-    inner: String,
-}
-
-impl WasmPersistError {
-    pub fn new(msg: impl Into<String>) -> Self {
-        Self { inner: msg.into() }
-    }
-}
-
-impl fmt::Display for WasmPersistError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.inner)
-    }
-}
-
-impl StdError for WasmPersistError {}
-
-// These are safe in single-threaded WASM
-unsafe impl Send for WasmPersistError {}
-unsafe impl Sync for WasmPersistError {}
-
-// Implement Persist trait
-impl Persist for PersistentWallet {
-    type Error = WasmPersistError;
-
-    fn as_mut(&mut self) -> &mut Self::Target {
-        self.wallet.as_mut()
-    }
-
-    async fn persist(&mut self) -> Result<(), Self::Error> {
-        Ok(())
-    }
-
-    fn into_value(self) -> Self::Target {
-        self.wallet.into_value()
-    }
+#[derive(Clone)]
+pub struct PersistentWallet {
+    pub(crate) wallet: Wallet,
+    storage: Storage,
+    pub signer: InMemorySigner,
 }
 
 /// A wallet that stores the user's chains and keys in memory.
-pub struct PersistentWallet {
-    pub wallet: linera_persistent::Memory<Wallet>,
-    pub signer: Signer,
-    pub storage: Storage,
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Wallet {
+    pub(crate) chains: wallet::Memory,
+    pub(crate) default: Option<ChainId>,
+    pub(crate) genesis_config: GenesisConfig,
 }
 
 // for local testing
@@ -82,30 +35,52 @@ pub struct PersistentWallet {
 const FAUCET_URL: &str = "https://faucet.testnet-conway.linera.net/";
 
 impl PersistentWallet {
-    pub async fn new() -> Result<Self, anyhow::Error> {
+    pub fn create_keystore(
+        keystore_path: PathBuf,
+    ) -> Result<persistent::File<InMemorySigner>, anyhow::Error> {
+        if keystore_path.exists() {
+            println!("Keystore exists: {}", keystore_path.display());
+        }
+        Ok(persistent::File::read(&keystore_path)?)
+    }
+    pub async fn new(keystore_path: Option<PathBuf>) -> Result<Self, anyhow::Error> {
         let faucet = Faucet::new(FAUCET_URL.to_string());
-        let mut wallet = linera_persistent::Memory::new(linera_client::wallet::Wallet::new(
-            faucet.genesis_config().await?,
-        ));
 
-        let mut signer = InMemorySigner::new(None);
-        let owner = signer.generate_new();
+        let mut wallet = Wallet {
+            chains: wallet::Memory::default(),
+            default: None,
+            genesis_config: faucet.genesis_config().await?,
+        };
 
-        let account_owner: AccountOwner = AccountOwner::from(owner);
-        let description = faucet.claim(&account_owner).await?;
+        let (signer, owner) = if let Some(keystore_path) = keystore_path {
+            let signer = Self::create_keystore(keystore_path)?;
+            let owner = signer.keys()[0].0;
+            (signer, owner)
+        } else {
+            let mut signer = InMemorySigner::new(None);
+            signer.generate_new();
+            let signer = persistent::File::new(Path::new("keystore.json"), signer.clone())?;
+            let owner = signer.keys()[0].0;
+            (signer, owner)
+        };
 
-        wallet
-            .mutate(|wallet| {
-                wallet.assign_new_chain_to_owner(
-                    account_owner,
-                    description.id(),
-                    description.timestamp(),
-                )
-            })
-            .await??;
+        let description = faucet.claim(&owner).await?;
+
+        let chain_id = description.id();
+        wallet.chains.insert(
+            chain_id,
+            wallet::Chain {
+                owner: Some(owner),
+                ..description.into()
+            },
+        );
+
+        if wallet.default.is_none() {
+            wallet.default = Some(chain_id);
+        }
 
         let inner_config = RocksDbStoreInternalConfig {
-            path_with_guard: PathWithGuard::new("./linera".into()),
+            path_with_guard: PathWithGuard::new("./client.db".into()),
             spawn_mode: RocksDbSpawnMode::SpawnBlocking, // Best for tokio multi-threaded
             max_stream_queries: 20,                      // Higher for better concurrency
         };
@@ -113,9 +88,14 @@ impl PersistentWallet {
         let config = RocksDbStoreConfig {
             inner_config,
             storage_cache_config: StorageCacheConfig {
-                max_entry_size: 200_000, // need to update these values to what's actually needed.
                 max_cache_size: 100000,
                 max_cache_entries: 100000,
+                max_cache_find_key_values_size: 1000,
+                max_cache_find_keys_size: 1000,
+                max_cache_value_size: 1000,
+                max_find_key_values_entry_size: 1000,
+                max_find_keys_entry_size: 1000,
+                max_value_entry_size: 1000,
             },
         };
 
@@ -127,9 +107,11 @@ impl PersistentWallet {
         .await
         .expect("failed to create storage");
 
+        persistent::File::new(Path::new("wallet.json"), wallet.clone())?;
+
         Ok(PersistentWallet {
             wallet,
-            signer,
+            signer: signer.into_value(),
             storage,
         })
     }

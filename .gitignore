@@ -1,4 +1,6 @@
 /target
 .env
 # an auto generated folder holding the db
-/linera
+/client.db
+keystore.json
+wallet.json

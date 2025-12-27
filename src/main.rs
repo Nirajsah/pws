@@ -3,9 +3,11 @@
 
 use crate::supabase::{SupabaseClient, SupabaseModel};
 use crate::{client::Client, wallet::PersistentWallet};
+pub mod chain;
 pub mod client;
 pub mod models;
 pub mod resource;
+pub mod storage;
 pub mod supabase;
 pub mod wallet;
 use crate::resource::start_resource_logger;
@@ -30,6 +32,9 @@ struct Args {
     /// Path to the wallet directory (must contain wallet.json, keystore.json, and client.db)
     #[arg(long = "with-wallet", value_name = "PATH", global = true)]
     wallet_path: Option<PathBuf>,
+
+    #[arg(long = "with-keystore", value_name = "PATH", global = true)]
+    keystore_path: Option<PathBuf>,
 
     #[arg(long)]
     metrics: bool,
@@ -140,8 +145,8 @@ async fn main() -> Result<()> {
     }
 
     // Initialize the persistent wallet
-    let persistent_wallet = PersistentWallet::new().await?;
-    let client_context = Client::new(persistent_wallet).await?;
+    let persistent_wallet = PersistentWallet::new(args.keystore_path).await?;
+    let client_context = Client::new(&persistent_wallet, None).await?;
 
     // Handle commands
     match args.command {
@@ -166,7 +171,9 @@ async fn main() -> Result<()> {
             println!(" Watch mode enabled");
             println!(" - Application ID: {}", app_id);
 
-            let app = client_context.frontend().application(&app_id).await?;
+            let chain = client_context.chain(None).await?;
+
+            let app = chain.application(&app_id).await?;
 
             let sub_query = r#"{ "query": "mutation { subscribe }" }"#;
             let _ = app.query(sub_query).await?;
@@ -184,7 +191,7 @@ async fn main() -> Result<()> {
             let supabase_client = Arc::new(SupabaseClient::new()?);
             let cache_clone = Arc::clone(&cache);
 
-            client_context.on_notification(move || {
+            chain.on_notification(move || {
                 let app = Arc::clone(&app_arc);
                 let cache = Arc::clone(&cache_clone);
                 let supabase_client = Arc::clone(&supabase_client);
@@ -390,7 +397,7 @@ async fn main() -> Result<()> {
                                 }
                             }
                         }
-                    } 
+                    }
                 }
             });
 
