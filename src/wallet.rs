@@ -1,7 +1,10 @@
 // Copyright (c) Zefchain Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use linera_base::{crypto::InMemorySigner, identifiers::ChainId};
+use linera_base::{
+    crypto::InMemorySigner,
+    identifiers::{AccountOwner, ChainId},
+};
 use linera_client::config::GenesisConfig;
 use linera_core::wallet;
 use linera_faucet_client::Faucet;
@@ -31,10 +34,14 @@ pub struct Wallet {
 }
 
 // for local testing
-// const FAUCET_URL: &str = "http://localhost:8079";
-const FAUCET_URL: &str = "https://faucet.testnet-conway.linera.net/";
+const FAUCET_URL: &str = "http://localhost:8079";
+// const FAUCET_URL: &str = "https://faucet.testnet-conway.linera.net/";
 
 impl PersistentWallet {
+    pub fn signer_address(&self) -> AccountOwner {
+        self.signer.keys()[0].0
+    }
+
     pub fn create_keystore(
         keystore_path: PathBuf,
     ) -> Result<persistent::File<InMemorySigner>, anyhow::Error> {
@@ -90,12 +97,12 @@ impl PersistentWallet {
             storage_cache_config: StorageCacheConfig {
                 max_cache_size: 100000,
                 max_cache_entries: 100000,
-                max_cache_find_key_values_size: 1000,
-                max_cache_find_keys_size: 1000,
-                max_cache_value_size: 1000,
-                max_find_key_values_entry_size: 1000,
-                max_find_keys_entry_size: 1000,
-                max_value_entry_size: 1000,
+                max_cache_find_key_values_size: 100000,
+                max_cache_find_keys_size: 100000,
+                max_cache_value_size: 100000,
+                max_find_key_values_entry_size: 100000,
+                max_find_keys_entry_size: 100000,
+                max_value_entry_size: 100000,
             },
         };
 

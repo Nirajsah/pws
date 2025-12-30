@@ -19,9 +19,14 @@ key directly in memory and uses it to sign.
 // ensure the generated code will return a `Promise`.
 #![allow(clippy::unused_async)]
 
+use anyhow::Ok;
 use futures::lock::Mutex as AsyncMutex;
 use linera_base::{crypto::InMemorySigner, identifiers::ChainId};
-use linera_client::chain_listener::{ChainListener, ClientContext as _};
+use linera_client::{
+    chain_listener::{ChainListener, ClientContext as _},
+    util::wait_for_next_round,
+};
+use linera_core::{client::ListeningMode, JoinSetExt};
 use std::sync::Arc;
 
 use crate::{chain::Chain, storage::Storage, wallet::PersistentWallet};
@@ -63,7 +68,7 @@ impl Client {
             .initialize_storage(&mut storage)
             .await?;
 
-        let client = linera_client::ClientContext::new(
+        let client_context = linera_client::ClientContext::new(
             storage.clone(),
             w.wallet.chains.clone(),
             w.signer.clone(),
@@ -75,8 +80,8 @@ impl Client {
 
         // The `Arc` here is useless, but it is required by the `ChainListener` API.
         #[expect(clippy::arc_with_non_send_sync)]
-        let client = Arc::new(AsyncMutex::new(client));
-        let client_clone = client.clone();
+        let client_context = Arc::new(AsyncMutex::new(client_context));
+        let client_clone = client_context.clone();
         let chain_listener = ChainListener::new(
             options.chain_listener_config,
             client_clone,
@@ -96,7 +101,7 @@ impl Client {
         eprintln!("Linera Web client successfully initialized");
 
         Ok(Client {
-            client_context: client,
+            client_context,
             persistent: w.clone(),
         })
     }
@@ -112,6 +117,8 @@ impl Client {
         let chain_client = ctx.make_chain_client(chain_id).await?;
 
         chain_client.synchronize_from_validators().await?;
+        chain_client.process_inbox().await?;
+
         ctx.update_wallet(&chain_client).await?;
 
         drop(ctx);
@@ -121,5 +128,50 @@ impl Client {
             client: self.clone(),
         };
         Ok(chain)
+    }
+
+    /// Connect to a chain on the Linera network.
+    /// If no chain is provided, Default chain is used
+    /// # Errors
+    ///
+    /// If the wallet could not be read or chain synchronization fails.
+    pub async fn assign_and_make_client(&self, chain_id: ChainId) -> Result<Chain, anyhow::Error> {
+        let owner = self.persistent.signer_address();
+        let mut ctx = self.client_context.lock().await;
+
+        if !ctx.wallet().chain_ids().contains(&chain_id) {
+            ctx.assign_new_chain_to_key(chain_id, owner).await?;
+        }
+
+        ctx.client.track_chain(chain_id);
+        let chain_client = ctx.make_chain_client(chain_id).await?;
+
+        let (listener, _listnen_handle, mut notificiation_stream) =
+            chain_client.listen(ListeningMode::FullChain).await?;
+
+        ctx.chain_listeners.spawn_task(listener);
+
+        chain_client.synchronize_from_validators().await?;
+
+        loop {
+            let (_, maybe_timeout) = {
+                let result = chain_client.process_inbox().await;
+                ctx.update_wallet_from_client(&chain_client).await?;
+                result?
+            };
+            if maybe_timeout.is_some() {
+                wait_for_next_round(&mut notificiation_stream, maybe_timeout.unwrap()).await;
+                continue;
+            } else {
+                break;
+            }
+        }
+
+        drop(ctx);
+
+        Ok(Chain {
+            chain_client,
+            client: self.clone(),
+        })
     }
 }

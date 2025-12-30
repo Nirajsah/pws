@@ -5,6 +5,7 @@ use crate::supabase::{SupabaseClient, SupabaseModel};
 use crate::{client::Client, wallet::PersistentWallet};
 pub mod chain;
 pub mod client;
+pub mod client_manager;
 pub mod models;
 pub mod resource;
 pub mod storage;
@@ -13,6 +14,7 @@ pub mod wallet;
 use crate::resource::start_resource_logger;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use client_manager::ChainClientManager;
 use models::tournament::{
     participants_query, ParticipantResponse, Tournament, TournamentParticipant, TournamentResponse,
     QUERY_TOURNAMENTS,
@@ -21,10 +23,14 @@ use models::{
     CountResponse, GameCount, LeaderBoardResponse, Leaderboard, MatchHistory, MatchHistoryDB,
     MatchHistoryResponse,
 };
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{fmt, EnvFilter};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -63,7 +69,12 @@ enum Commands {
         #[arg(long, value_name = "APP_ID")]
         app_id: String,
     },
-    Supabase,
+    /// Subscribe and watch an existing application
+    ChainService {
+        /// Application ID to subscribe to
+        #[arg(long, value_name = "APP_ID")]
+        app_id: String,
+    },
 }
 
 /// Validates that the wallet directory contains all required files
@@ -135,8 +146,20 @@ struct CachedState {
     tournaments: HashMap<String, Tournament>,
     participants: HashMap<String, HashMap<String, TournamentParticipant>>,
 }
+
+fn init_logging() {
+    tracing_subscriber::Registry::default()
+        .with(fmt::layer().with_target(true).without_time()) // show targets, optional timestamps
+        .with(EnvFilter::from_default_env()) // reads RUST_LOG
+        .init();
+}
+
+const SUB_QUERY: &str = r#"{ "query": "mutation { subscribe }" }"#;
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_logging();
+
     let args = Args::parse();
 
     // Validate wallet directory if provided
@@ -147,6 +170,8 @@ async fn main() -> Result<()> {
     // Initialize the persistent wallet
     let persistent_wallet = PersistentWallet::new(args.keystore_path).await?;
     let client_context = Client::new(&persistent_wallet, None).await?;
+
+    let chain = client_context.chain(None).await?;
 
     // Handle commands
     match args.command {
@@ -171,12 +196,9 @@ async fn main() -> Result<()> {
             println!(" Watch mode enabled");
             println!(" - Application ID: {}", app_id);
 
-            let chain = client_context.chain(None).await?;
-
             let app = chain.application(&app_id).await?;
 
-            let sub_query = r#"{ "query": "mutation { subscribe }" }"#;
-            let _ = app.query(sub_query).await?;
+            app.query(SUB_QUERY).await?;
 
             // Create shared cache
             let cache = Arc::new(Mutex::new(CachedState {
@@ -403,11 +425,72 @@ async fn main() -> Result<()> {
 
             println!(" Watching for events...");
         }
-        Commands::Supabase => {
-            todo!()
+        Commands::ChainService { app_id } => {
+            let app = chain.application(&app_id.clone()).await?;
+
+            app.query(SUB_QUERY).await?;
+            let app_arc = Arc::new(app);
+
+            let client_manager = ChainClientManager::default();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+
+            chain.on_notification(move || {
+                let chains = r#"{ "query": "query { tournamentChains }" }"#;
+                let app = Arc::clone(&app_arc);
+                let tx = tx.clone();
+
+                async move {
+                    let chain_response = match app.query(chains).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("✗ Chain query failed: {}", e);
+                            return;
+                        }
+                    };
+
+                    let chains: Option<TournamentChainsResponse> =
+                        match serde_json::from_str(&chain_response) {
+                            Ok(d) => Some(d),
+                            Err(e) => {
+                                eprintln!("✗ Failed to parse tournament chains: {}", e);
+                                None
+                            }
+                        };
+
+                    if let Some(chains) = chains {
+                        if chains.data.tournament_chains.len() > 0 {
+                            tx.send(chains.data.tournament_chains)
+                                .await
+                                .expect("failed to send update");
+                        }
+                    }
+                }
+            });
+
+            tokio::spawn(async move {
+                while let Some(chains) = rx.recv().await {
+                    for id in chains {
+                        client_manager
+                            .ensure_running(id, &chain.client, &app_id)
+                            .await;
+                    }
+                }
+            });
+            println!("Watching for tournament Chains...");
         }
     }
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TournamentChainsResponse {
+    pub data: TournamentChains,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TournamentChains {
+    #[serde(rename = "tournamentChains")]
+    pub tournament_chains: Vec<String>,
 }

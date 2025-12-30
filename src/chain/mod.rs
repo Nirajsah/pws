@@ -42,9 +42,20 @@ impl Chain {
         let mut notifications = self.chain_client.subscribe().unwrap();
         tokio::spawn(async move {
             while let Some(_notification) = notifications.next().await {
-                f().await;
+                // if let Reason::BlockExecuted { .. } = notification.reason {
+                // This will run only for NewBlock, regardless of its fields
+                f().await
+                // }
             }
         });
+    }
+
+    /// Gets the balance of the default chain.
+    ///
+    /// # Errors
+    /// If the chain couldn't be established.
+    pub async fn balance(&self) -> Result<String, anyhow::Error> {
+        Ok(self.chain_client.query_balance().await?.to_string())
     }
 
     /// Retrieves an application for querying.
